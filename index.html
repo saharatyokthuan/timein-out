@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes"/>
+<title>ลงเวลาทำงาน</title>
+<link rel="stylesheet" href="style.css"/>
+</head>
+<body>
+
+<div class="app-header">
+  <div class="header-left">
+    <span class="logo">⏱️</span>
+    <span class="app-title">ลงเวลาทำงาน</span>
+  </div>
+  <div class="header-right">
+    <button class="btn-chip" onclick="exportBackup()">Backup</button>
+    <button class="btn-chip" onclick="document.getElementById('restoreInput').click()">Restore</button>
+    <input type="file" id="restoreInput" accept=".json" style="display:none" onchange="importBackup(event)">
+  </div>
+</div>
+
+<div class="tab-bar">
+  <button type="button" class="tab-btn active" data-tab="record" onclick="showTab('record')">📝 บันทึก</button>
+  <button type="button" class="tab-btn" data-tab="history" onclick="showTab('history')">📜 ประวัติ</button>
+  <button type="button" class="tab-btn" data-tab="trend" onclick="showTab('trend')">📈 สรุป</button>
+  <button type="button" class="tab-btn" data-tab="settings" onclick="showTab('settings')">⚙️ กะงาน</button>
+</div>
+
+<!-- ===== RECORD TAB ===== -->
+<div class="tab-page active" id="tab-record">
+  <div id="editingBanner" class="editing-banner" style="display:none;">
+    ✏️ กำลังแก้ไขรายการที่เลือก
+    <button type="button" class="btn-cancel-edit" onclick="cancelEdit()">ยกเลิกแก้ไข</button>
+  </div>
+
+  <div class="card">
+    <div class="card-title">ข้อมูลวัน</div>
+    <div class="form-row">
+      <div class="form-group"><label for="dateInput">วันที่</label><input type="date" id="dateInput" onchange="updateStatusPreview()"></div>
+      <div class="form-group"><label for="shiftSelect">กะ</label><select id="shiftSelect" onchange="onShiftChange()"></select></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label for="clockInInput">เวลาเข้า</label><input type="time" id="clockInInput" oninput="updateStatusPreview()"></div>
+      <div class="form-group"><label for="clockOutInput">เวลาออก</label><input type="time" id="clockOutInput" oninput="updateStatusPreview()"></div>
+    </div>
+    <div class="form-group full">
+      <label for="noteInput">หมายเหตุเพิ่มเติม (ถ้ามี)</label>
+      <input type="text" id="noteInput" placeholder="เช่น ลาป่วยครึ่งวัน">
+    </div>
+  </div>
+
+  <div class="card summary-card">
+    <div class="status-badge" id="statusPreview">- ยังไม่กรอกข้อมูล -</div>
+  </div>
+
+  <button type="button" class="btn-save-slip" onclick="saveEntry()">💾 บันทึกวันนี้</button>
+</div>
+
+<!-- ===== HISTORY TAB ===== -->
+<div class="tab-page" id="tab-history">
+  <div class="list-header">ประวัติทั้งหมด (<span id="historyCount">0</span>)</div>
+  <div id="historyList" class="history-list"></div>
+</div>
+
+<!-- ===== TREND TAB ===== -->
+<div class="tab-page" id="tab-trend">
+  <div class="card">
+    <div class="card-title">สรุปภาพรวม</div>
+    <div class="grid-3">
+      <div class="stat-box"><div class="stat-label">สายเฉลี่ย/เดือน (นาที)</div><div class="stat-val" id="avgLate">0</div></div>
+      <div class="stat-box"><div class="stat-label">เดือนที่สายมากสุด</div><div class="stat-val bad" id="maxLate">-</div></div>
+      <div class="stat-box"><div class="stat-label">เดือนที่สายน้อยสุด</div><div class="stat-val good" id="minLate">-</div></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">แนวโน้มนาทีสายรายเดือน</div>
+    <canvas id="trendChart"></canvas>
+    <div id="trendEmpty" class="empty-hint" style="display:none;">ยังไม่มีข้อมูลพอสำหรับกราฟ</div>
+  </div>
+  <div class="card">
+    <div class="card-title">มาทำงาน vs ขาดงาน รายเดือน</div>
+    <canvas id="barChart"></canvas>
+    <div id="barEmpty" class="empty-hint" style="display:none;">ยังไม่มีข้อมูลพอสำหรับกราฟ</div>
+  </div>
+</div>
+
+<!-- ===== SETTINGS TAB (จัดการกะงาน) ===== -->
+<div class="tab-page" id="tab-settings">
+  <div class="card">
+    <div class="card-title">เพิ่มกะใหม่</div>
+    <div class="form-row">
+      <div class="form-group"><label for="newShiftCode">รหัสกะ</label><input type="text" id="newShiftCode" placeholder="เช่น T10"></div>
+      <div class="form-group"><label for="newShiftName">ชื่อกะ</label><input type="text" id="newShiftName" placeholder="เช่น กะเช้า"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label for="newShiftStart">เวลาเริ่ม</label><input type="time" id="newShiftStart"></div>
+      <div class="form-group"><label for="newShiftEnd">เวลาเลิก</label><input type="time" id="newShiftEnd"></div>
+    </div>
+    <label class="checkbox-row"><input type="checkbox" id="newShiftIsOff"> เป็นวันหยุด (ไม่มีเวลาเข้า-ออก)</label>
+    <button type="button" class="btn-add" style="margin-top:0.6rem;" onclick="addShiftFromInput()">＋ เพิ่มกะ</button>
+  </div>
+  <div id="shiftList" class="category-list"></div>
+</div>
+
+<!-- ===== DETAIL MODAL ===== -->
+<div class="modal-bg" id="detailModalBg">
+  <div class="modal">
+    <h2 id="detailTitle">รายละเอียด</h2>
+    <div id="detailBody" class="detail-body"></div>
+    <div class="modal-btns">
+      <button type="button" class="btn-cancel" onclick="closeDetail()">ปิด</button>
+      <button type="button" class="btn-del" onclick="deleteEntryFromDetail()">🗑️ ลบ</button>
+      <button type="button" class="btn-save" onclick="editEntryFromDetail()">✏️ แก้ไข</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== CONFIRM MODAL ===== -->
+<div class="modal-bg" id="confirmModalBg">
+  <div class="modal" style="max-width:340px;">
+    <h2 id="confirmTitle" style="color:var(--red);">ยืนยันการดำเนินการ</h2>
+    <p id="confirmMessage" class="confirm-msg"></p>
+    <div class="modal-btns">
+      <button type="button" class="btn-cancel" id="confirmNoBtn">ยกเลิก</button>
+      <button type="button" class="btn-save" id="confirmYesBtn" style="border-color:var(--red) !important;color:var(--red);">ยืนยัน</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<script src="script.js" defer></script>
+</body>
+</html>

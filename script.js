@@ -1,0 +1,593 @@
+// ---- STORAGE ----
+const STORAGE_KEY = 'attendanceData_v1';
+const SHIFTS_KEY = 'attendanceShifts_v1';
+window.entries = [];
+let editingId = null;
+let detailId = null;
+
+function loadData() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    window.entries = raw ? JSON.parse(raw) : [];
+  } catch (e) {
+    window.entries = [];
+  }
+}
+
+function saveData() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(window.entries));
+}
+
+function loadShifts() {
+  try {
+    const raw = localStorage.getItem(SHIFTS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveShifts(shifts) {
+  localStorage.setItem(SHIFTS_KEY, JSON.stringify(shifts));
+}
+
+function seedDefaultShiftsIfEmpty() {
+  if (localStorage.getItem(SHIFTS_KEY)) return;
+  saveShifts([
+    { code: 'T10', name: 'กะ 10:00-19:00', start: '10:00', end: '19:00', isOff: false },
+    { code: 'T13', name: 'กะ 13:00-22:00', start: '13:00', end: '22:00', isOff: false },
+    { code: 'OFF', name: 'วันหยุด', start: '', end: '', isOff: true }
+  ]);
+}
+
+function getShift(code) {
+  return loadShifts().find(s => s.code === code);
+}
+
+// ---- HELPER ----
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(window._toastTimer);
+  window._toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+function showConfirmModal(message) {
+  return new Promise(resolve => {
+    document.getElementById('confirmMessage').textContent = message;
+    const bg = document.getElementById('confirmModalBg');
+    bg.classList.add('active');
+    const yes = document.getElementById('confirmYesBtn');
+    const no = document.getElementById('confirmNoBtn');
+    const cleanup = (result) => {
+      bg.classList.remove('active');
+      yes.onclick = null;
+      no.onclick = null;
+      resolve(result);
+    };
+    yes.onclick = () => cleanup(true);
+    no.onclick = () => cleanup(false);
+  });
+}
+
+// ---- TIME MATH ----
+function toMinutes(hhmm) {
+  if (!hhmm) return null;
+  const [h, m] = hhmm.split(':').map(Number);
+  return h * 60 + m;
+}
+
+function minutesToText(min) {
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  if (h > 0 && m > 0) return `${h} ชม. ${m} นาที`;
+  if (h > 0) return `${h} ชม.`;
+  return `${m} นาที`;
+}
+
+// คำนวณสถานะจากกะ + เวลาเข้า-ออกจริง
+function calcStatus(shiftCode, clockIn, clockOut) {
+  const shift = getShift(shiftCode);
+  if (!shift) return { label: 'ไม่พบข้อมูลกะ', cls: 'off', lateMin: 0, earlyMin: 0, otMin: 0 };
+  if (shift.isOff) return { label: '🟦 วันหยุด', cls: 'off', lateMin: 0, earlyMin: 0, otMin: 0 };
+  if (!clockIn) return { label: '🔴 ขาดงานเต็มวัน', cls: 'absent', lateMin: 0, earlyMin: 0, otMin: 0 };
+
+  const shiftStart = toMinutes(shift.start);
+  const shiftEnd = toMinutes(shift.end);
+  const inMin = toMinutes(clockIn);
+  let outMin = clockOut ? toMinutes(clockOut) : null;
+  if (outMin !== null && outMin < shiftStart) outMin += 24 * 60; // ข้ามเที่ยงคืน
+
+  const lateMin = Math.max(0, inMin - shiftStart);
+  const earlyMin = outMin !== null ? Math.max(0, shiftEnd - outMin) : 0;
+  const otMin = outMin !== null ? Math.max(0, outMin - shiftEnd) : 0;
+  const deficit = lateMin + earlyMin;
+
+  if (!clockOut) return { label: `🟡 สาย ${minutesToText(lateMin)} (ยังไม่ลงเวลาออก)`, cls: 'late', lateMin, earlyMin: 0, otMin: 0 };
+  if (deficit === 0 && otMin > 0) return { label: `🟢 ตรงเวลา (ทำงานเกิน ${minutesToText(otMin)})`, cls: 'ontime', lateMin, earlyMin, otMin };
+  if (deficit === 0) return { label: '🟢 ตรงเวลา', cls: 'ontime', lateMin: 0, earlyMin: 0, otMin };
+  if (lateMin > 0 && earlyMin > 0) return { label: `🔴 ขาดงาน ${minutesToText(deficit)}`, cls: 'absent', lateMin, earlyMin, otMin };
+  if (lateMin > 0) return { label: `🟡 สาย ${minutesToText(lateMin)}`, cls: 'late', lateMin, earlyMin, otMin };
+  return { label: `🟠 ออกก่อนเวลา ${minutesToText(earlyMin)}`, cls: 'late', lateMin, earlyMin, otMin };
+}
+
+// ---- TABS ----
+function showTab(tab) {
+  document.querySelectorAll('.tab-page').forEach(p => p.classList.remove('active'));
+  document.getElementById('tab-' + tab).classList.add('active');
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelector(`.tab-btn[data-tab="${tab}"]`).classList.add('active');
+  if (tab === 'history') renderHistory();
+  if (tab === 'trend') renderTrend();
+  if (tab === 'settings') renderShiftList();
+}
+
+// ---- SHIFT DROPDOWN (record form) ----
+function populateShiftSelect(selected) {
+  const sel = document.getElementById('shiftSelect');
+  const shifts = loadShifts();
+  sel.innerHTML = shifts.map(s => `<option value="${escapeHtml(s.code)}"${s.code === selected ? ' selected' : ''}>${escapeHtml(s.code)} - ${escapeHtml(s.name)}</option>`).join('');
+}
+
+function onShiftChange() {
+  const shift = getShift(document.getElementById('shiftSelect').value);
+  const inInput = document.getElementById('clockInInput');
+  const outInput = document.getElementById('clockOutInput');
+  if (shift && shift.isOff) {
+    inInput.value = '';
+    outInput.value = '';
+    inInput.disabled = true;
+    outInput.disabled = true;
+  } else {
+    inInput.disabled = false;
+    outInput.disabled = false;
+  }
+  updateStatusPreview();
+}
+
+function updateStatusPreview() {
+  const shiftCode = document.getElementById('shiftSelect').value;
+  const clockIn = document.getElementById('clockInInput').value;
+  const clockOut = document.getElementById('clockOutInput').value;
+  const badge = document.getElementById('statusPreview');
+  if (!shiftCode) { badge.textContent = '- ยังไม่กรอกข้อมูล -'; badge.className = 'status-badge'; return; }
+  const status = calcStatus(shiftCode, clockIn, clockOut);
+  badge.textContent = status.label;
+  badge.className = 'status-badge ' + status.cls;
+}
+
+// ---- SAVE / EDIT / CANCEL ----
+function clearForm() {
+  document.getElementById('dateInput').valueAsDate = new Date();
+  populateShiftSelect('');
+  document.getElementById('clockInInput').value = '';
+  document.getElementById('clockOutInput').value = '';
+  document.getElementById('clockInInput').disabled = false;
+  document.getElementById('clockOutInput').disabled = false;
+  document.getElementById('noteInput').value = '';
+  editingId = null;
+  document.getElementById('editingBanner').style.display = 'none';
+  updateStatusPreview();
+}
+
+function cancelEdit() {
+  clearForm();
+  showToast('ยกเลิกการแก้ไข');
+}
+
+function saveEntry() {
+  const date = document.getElementById('dateInput').value;
+  const shiftCode = document.getElementById('shiftSelect').value;
+  const clockIn = document.getElementById('clockInInput').value;
+  const clockOut = document.getElementById('clockOutInput').value;
+  const note = document.getElementById('noteInput').value.trim();
+
+  if (!date) { showToast('⚠️ กรุณาระบุวันที่'); return; }
+  if (!shiftCode) { showToast('⚠️ กรุณาเลือกกะ'); return; }
+
+  const entry = { id: editingId || Date.now(), date, shiftCode, clockIn, clockOut, note };
+
+  if (editingId) {
+    const idx = window.entries.findIndex(e => e.id === editingId);
+    if (idx !== -1) window.entries[idx] = entry;
+  } else {
+    window.entries.push(entry);
+  }
+  saveData();
+  showToast(editingId ? '✅ แก้ไขรายการแล้ว' : '✅ บันทึกแล้ว');
+  clearForm();
+  showTab('history');
+}
+
+// ---- HISTORY ----
+function renderHistory() {
+  const list = document.getElementById('historyList');
+  document.getElementById('historyCount').textContent = window.entries.length;
+  if (!window.entries.length) {
+    list.innerHTML = '<div class="empty-hint">ยังไม่มีรายการที่บันทึกไว้</div>';
+    return;
+  }
+  const sorted = [...window.entries].sort((a, b) => b.date.localeCompare(a.date));
+  list.innerHTML = sorted.map(e => {
+    const status = calcStatus(e.shiftCode, e.clockIn, e.clockOut);
+    const timesText = status.cls === 'off' ? 'วันหยุด' : `${e.clockIn || '-'} - ${e.clockOut || '-'}`;
+    return `
+    <div class="hist-card" onclick="openDetail(${e.id})">
+      <div class="hist-top">
+        <span class="hist-date">${escapeHtml(e.date)}</span>
+        <span class="hist-shift">${escapeHtml(e.shiftCode)}</span>
+      </div>
+      <div class="hist-bottom">
+        <span class="hist-times">${timesText}</span>
+        <span class="hist-status ${status.cls}">${status.label}</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function openDetail(id) {
+  const e = window.entries.find(x => x.id === id);
+  if (!e) return;
+  detailId = id;
+  const shift = getShift(e.shiftCode);
+  const status = calcStatus(e.shiftCode, e.clockIn, e.clockOut);
+  document.getElementById('detailTitle').textContent = `รายการวันที่ ${e.date}`;
+  document.getElementById('detailBody').innerHTML = `
+    <div class="detail-row"><span>กะ</span><span>${escapeHtml(e.shiftCode)} (${escapeHtml(shift ? shift.name : '-')})</span></div>
+    <div class="detail-row"><span>เวลาเข้า</span><span>${escapeHtml(e.clockIn || '-')}</span></div>
+    <div class="detail-row"><span>เวลาออก</span><span>${escapeHtml(e.clockOut || '-')}</span></div>
+    ${e.note ? `<div class="detail-row"><span>หมายเหตุ</span><span>${escapeHtml(e.note)}</span></div>` : ''}
+    <div class="detail-row total"><span>สถานะ</span><span>${status.label}</span></div>
+  `;
+  document.getElementById('detailModalBg').classList.add('active');
+}
+
+function closeDetail() {
+  document.getElementById('detailModalBg').classList.remove('active');
+  detailId = null;
+}
+
+function editEntryFromDetail() {
+  const e = window.entries.find(x => x.id === detailId);
+  if (!e) return;
+  closeDetail();
+  document.getElementById('dateInput').value = e.date;
+  populateShiftSelect(e.shiftCode);
+  onShiftChange();
+  document.getElementById('clockInInput').value = e.clockIn || '';
+  document.getElementById('clockOutInput').value = e.clockOut || '';
+  document.getElementById('noteInput').value = e.note || '';
+  editingId = e.id;
+  document.getElementById('editingBanner').style.display = 'flex';
+  updateStatusPreview();
+  showTab('record');
+}
+
+async function deleteEntryFromDetail() {
+  if (!detailId) return;
+  const ok = await showConfirmModal('ต้องการลบรายการนี้หรือไม่?');
+  if (!ok) return;
+  window.entries = window.entries.filter(e => e.id !== detailId);
+  saveData();
+  closeDetail();
+  renderHistory();
+  showToast('🗑️ ลบรายการแล้ว');
+}
+
+// ---- TREND ----
+function monthKey(dateStr) {
+  return (dateStr || '').slice(0, 7); // YYYY-MM
+}
+
+function monthShortLabel(mk) {
+  const months = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+  const [y, m] = mk.split('-');
+  return months[parseInt(m, 10) - 1] + ' ' + (parseInt(y, 10) + 543).toString().slice(2);
+}
+
+function monthlyBuckets() {
+  const map = {};
+  window.entries.forEach(e => {
+    const status = calcStatus(e.shiftCode, e.clockIn, e.clockOut);
+    const mk = monthKey(e.date);
+    if (!map[mk]) map[mk] = { lateMin: 0, present: 0, absent: 0 };
+    map[mk].lateMin += status.lateMin + status.earlyMin;
+    if (status.cls === 'off') { /* ไม่นับ */ }
+    else if (status.cls === 'absent' && !e.clockIn) map[mk].absent += 1;
+    else map[mk].present += 1;
+  });
+  return Object.keys(map).sort().map(mk => ({ month: mk, ...map[mk] }));
+}
+
+function renderTrend() {
+  const buckets = monthlyBuckets();
+
+  if (buckets.length) {
+    const avg = buckets.reduce((s, b) => s + b.lateMin, 0) / buckets.length;
+    const maxB = buckets.reduce((a, b) => b.lateMin > a.lateMin ? b : a);
+    const minB = buckets.reduce((a, b) => b.lateMin < a.lateMin ? b : a);
+    document.getElementById('avgLate').textContent = Math.round(avg);
+    document.getElementById('maxLate').textContent = `${monthShortLabel(maxB.month)} (${maxB.lateMin} น.)`;
+    document.getElementById('minLate').textContent = `${monthShortLabel(minB.month)} (${minB.lateMin} น.)`;
+  } else {
+    document.getElementById('avgLate').textContent = '0';
+    document.getElementById('maxLate').textContent = '-';
+    document.getElementById('minLate').textContent = '-';
+  }
+
+  drawLineChart(buckets);
+  drawBarChart(buckets);
+}
+
+function setupCanvas(canvas) {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = 180 * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, w: rect.width, h: 180 };
+}
+
+function drawLineChart(buckets) {
+  const canvas = document.getElementById('trendChart');
+  const emptyEl = document.getElementById('trendEmpty');
+  if (buckets.length < 2) { canvas.style.display = 'none'; emptyEl.style.display = 'block'; return; }
+  canvas.style.display = 'block'; emptyEl.style.display = 'none';
+
+  const { ctx, w, h } = setupCanvas(canvas);
+  ctx.clearRect(0, 0, w, h);
+  const pad = { l: 44, r: 12, t: 12, b: 24 };
+  const values = buckets.map(b => b.lateMin);
+  const max = Math.max(...values, 1);
+  const stepX = (w - pad.l - pad.r) / (buckets.length - 1);
+
+  ctx.strokeStyle = '#223140'; ctx.lineWidth = 1;
+  for (let i = 0; i <= 3; i++) {
+    const y = pad.t + (h - pad.t - pad.b) * (i / 3);
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
+    const val = max - (max * i / 3);
+    ctx.fillStyle = '#7f93a3'; ctx.font = '9px sans-serif'; ctx.textAlign = 'right';
+    ctx.fillText(Math.round(val).toLocaleString(), pad.l - 6, y + 3);
+  }
+
+  ctx.strokeStyle = '#fbbf24'; ctx.lineWidth = 2; ctx.beginPath();
+  values.forEach((v, i) => {
+    const x = pad.l + i * stepX;
+    const y = pad.t + (h - pad.t - pad.b) * (1 - v / max);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  ctx.fillStyle = '#fbbf24';
+  values.forEach((v, i) => {
+    const x = pad.l + i * stepX;
+    const y = pad.t + (h - pad.t - pad.b) * (1 - v / max);
+    ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
+  });
+
+  ctx.fillStyle = '#7f93a3'; ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
+  [0, Math.floor(buckets.length / 2), buckets.length - 1].forEach(i => {
+    const x = pad.l + i * stepX;
+    ctx.fillText(monthShortLabel(buckets[i].month), x, h - 6);
+  });
+}
+
+function drawBarChart(buckets) {
+  const canvas = document.getElementById('barChart');
+  const emptyEl = document.getElementById('barEmpty');
+  if (!buckets.length) { canvas.style.display = 'none'; emptyEl.style.display = 'block'; return; }
+  canvas.style.display = 'block'; emptyEl.style.display = 'none';
+
+  const { ctx, w, h } = setupCanvas(canvas);
+  ctx.clearRect(0, 0, w, h);
+  const pad = { l: 30, r: 12, t: 12, b: 24 };
+  const recent = buckets.slice(-6);
+  const max = Math.max(...recent.map(b => Math.max(b.present, b.absent)), 1);
+  const groupW = (w - pad.l - pad.r) / recent.length;
+  const barW = Math.min(16, groupW / 3);
+
+  recent.forEach((b, i) => {
+    const cx = pad.l + groupW * i + groupW / 2;
+    const presH = (h - pad.t - pad.b) * (b.present / max);
+    const absH = (h - pad.t - pad.b) * (b.absent / max);
+    ctx.fillStyle = '#34d399';
+    ctx.fillRect(cx - barW - 2, h - pad.b - presH, barW, presH);
+    ctx.fillStyle = '#f87171';
+    ctx.fillRect(cx + 2, h - pad.b - absH, barW, absH);
+    ctx.fillStyle = '#7f93a3'; ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(monthShortLabel(b.month), cx, h - 6);
+  });
+
+  ctx.strokeStyle = '#223140'; ctx.beginPath();
+  ctx.moveTo(pad.l, h - pad.b); ctx.lineTo(w - pad.r, h - pad.b); ctx.stroke();
+}
+
+// ---- SHIFT MANAGEMENT (settings tab) ----
+function addShiftFromInput() {
+  const code = document.getElementById('newShiftCode').value.trim();
+  const name = document.getElementById('newShiftName').value.trim();
+  const start = document.getElementById('newShiftStart').value;
+  const end = document.getElementById('newShiftEnd').value;
+  const isOff = document.getElementById('newShiftIsOff').checked;
+
+  if (!code) { showToast('⚠️ กรุณาระบุรหัสกะ'); return; }
+  const shifts = loadShifts();
+  if (shifts.some(s => s.code === code)) { showToast('⚠️ มีรหัสกะนี้อยู่แล้ว'); return; }
+  if (!isOff && (!start || !end)) { showToast('⚠️ กรุณาระบุเวลาเริ่ม-เลิก'); return; }
+
+  shifts.push({ code, name: name || code, start: isOff ? '' : start, end: isOff ? '' : end, isOff });
+  saveShifts(shifts);
+
+  document.getElementById('newShiftCode').value = '';
+  document.getElementById('newShiftName').value = '';
+  document.getElementById('newShiftStart').value = '';
+  document.getElementById('newShiftEnd').value = '';
+  document.getElementById('newShiftIsOff').checked = false;
+  renderShiftList();
+  populateShiftSelect(document.getElementById('shiftSelect').value);
+  showToast('✅ เพิ่มกะแล้ว');
+}
+
+function renderShiftList() {
+  const list = document.getElementById('shiftList');
+  const shifts = loadShifts();
+  if (!shifts.length) {
+    list.innerHTML = '<div class="empty-hint">ยังไม่มีกะที่ตั้งค่าไว้</div>';
+    return;
+  }
+  list.innerHTML = shifts.map(s => `
+    <div class="cat-row" data-code="${escapeHtml(s.code)}">
+      <div>
+        <div class="cat-name">${escapeHtml(s.code)} - ${escapeHtml(s.name)}</div>
+        <div class="cat-sub">${s.isOff ? 'วันหยุด' : escapeHtml(s.start) + ' - ' + escapeHtml(s.end)}</div>
+      </div>
+      <div class="cat-actions">
+        <button type="button" data-action="rename">✏️</button>
+        <button type="button" data-action="delete">🗑️</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function startRenameShift(row) {
+  const code = row.dataset.code;
+  const shifts = loadShifts();
+  const s = shifts.find(x => x.code === code);
+  if (!s) return;
+  row.innerHTML = `
+    <div class="cat-rename-form">
+      <div class="form-row">
+        <input type="text" class="shift-edit-name" value="${escapeHtml(s.name)}" placeholder="ชื่อกะ">
+        <input type="text" class="shift-edit-start" value="${escapeHtml(s.start)}" placeholder="เริ่ม HH:MM" ${s.isOff ? 'disabled' : ''}>
+      </div>
+      <div class="form-row">
+        <input type="text" class="shift-edit-end" value="${escapeHtml(s.end)}" placeholder="เลิก HH:MM" ${s.isOff ? 'disabled' : ''}>
+        <div class="cat-actions">
+          <button type="button" class="btn-cat-save" data-action="save-rename">✔️ บันทึก</button>
+          <button type="button" class="btn-cat-cancel" data-action="cancel-rename">✕ ยกเลิก</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function saveRenameShift(row) {
+  const code = row.dataset.code;
+  const shifts = loadShifts();
+  const idx = shifts.findIndex(x => x.code === code);
+  if (idx === -1) return;
+  const name = row.querySelector('.shift-edit-name').value.trim();
+  const start = row.querySelector('.shift-edit-start').value.trim();
+  const end = row.querySelector('.shift-edit-end').value.trim();
+  if (!name) { showToast('⚠️ กรุณาระบุชื่อกะ'); return; }
+  shifts[idx].name = name;
+  if (!shifts[idx].isOff) {
+    shifts[idx].start = start;
+    shifts[idx].end = end;
+  }
+  saveShifts(shifts);
+  renderShiftList();
+  populateShiftSelect(document.getElementById('shiftSelect').value);
+  showToast('✅ แก้ไขกะแล้ว');
+}
+
+async function deleteShiftRow(row) {
+  const code = row.dataset.code;
+  const usedCount = window.entries.filter(e => e.shiftCode === code).length;
+  const msg = usedCount
+    ? `กะ "${code}" ถูกใช้ใน ${usedCount} รายการเก่า ข้อมูลเก่ายังอยู่แต่จะเลือกกะนี้ในรายการใหม่ไม่ได้อีก ยืนยันหรือไม่?`
+    : `ลบกะ "${code}" หรือไม่?`;
+  const ok = await showConfirmModal(msg);
+  if (!ok) return;
+  const shifts = loadShifts().filter(s => s.code !== code);
+  saveShifts(shifts);
+  renderShiftList();
+  populateShiftSelect(document.getElementById('shiftSelect').value);
+  showToast('🗑️ ลบกะแล้ว');
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const list = document.getElementById('shiftList');
+  if (!list) return;
+  list.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+    const row = btn.closest('.cat-row');
+    if (!row) return;
+    const action = btn.dataset.action;
+    if (action === 'rename') startRenameShift(row);
+    else if (action === 'delete') deleteShiftRow(row);
+    else if (action === 'save-rename') saveRenameShift(row);
+    else if (action === 'cancel-rename') renderShiftList();
+  });
+});
+
+// ---- BACKUP / RESTORE ----
+function exportBackup() {
+  const data = JSON.stringify({ entries: window.entries, shifts: loadShifts(), exportedAt: new Date().toISOString() }, null, 2);
+  const blob = new Blob([data], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const d = new Date();
+  const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+  a.href = url;
+  a.download = `attendance-backup-${stamp}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast('📥 ส่งออกข้อมูลแล้ว');
+}
+
+async function importBackup(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const parsed = JSON.parse(text);
+    const incomingEntries = Array.isArray(parsed.entries) ? parsed.entries : null;
+    if (!incomingEntries) { showToast('⚠️ ไฟล์ไม่ถูกต้อง'); return; }
+    const ok = await showConfirmModal(`นำเข้า ${incomingEntries.length} รายการ จะรวมกับข้อมูลเดิม ยืนยันหรือไม่?`);
+    if (!ok) return;
+    const existingIds = new Set(window.entries.map(e => e.id));
+    incomingEntries.forEach(e => {
+      if (existingIds.has(e.id)) e.id = Date.now() + Math.floor(Math.random() * 1000);
+      window.entries.push(e);
+    });
+    saveData();
+    if (Array.isArray(parsed.shifts)) {
+      const shifts = loadShifts();
+      const codes = new Set(shifts.map(s => s.code));
+      parsed.shifts.forEach(s => { if (!codes.has(s.code)) shifts.push(s); });
+      saveShifts(shifts);
+    }
+    renderHistory();
+    showToast('✅ นำเข้าข้อมูลสำเร็จ');
+  } catch (e) {
+    showToast('⚠️ อ่านไฟล์ไม่สำเร็จ');
+  }
+  event.target.value = '';
+}
+
+// ---- INIT ----
+function initApp() {
+  seedDefaultShiftsIfEmpty();
+  loadData();
+  clearForm();
+  renderHistory();
+  window.addEventListener('resize', () => {
+    if (document.getElementById('tab-trend').classList.contains('active')) renderTrend();
+  });
+}
+
+initApp();
