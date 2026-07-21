@@ -104,10 +104,11 @@ function calcStatus(shiftCode, clockIn, clockOut) {
   if (!clockIn) return { label: '🔴 ขาดงานเต็มวัน', cls: 'absent', lateMin: 0, earlyMin: 0, otMin: 0 };
 
   const shiftStart = toMinutes(shift.start);
-  const shiftEnd = toMinutes(shift.end);
+  let shiftEnd = toMinutes(shift.end);
+  if (shiftEnd <= shiftStart) shiftEnd += 24 * 60; // กะข้ามเที่ยงคืน เช่น 22:00-07:00
   const inMin = toMinutes(clockIn);
   let outMin = clockOut ? toMinutes(clockOut) : null;
-  if (outMin !== null && outMin < shiftStart) outMin += 24 * 60; // ข้ามเที่ยงคืน
+  if (outMin !== null && outMin < shiftStart) outMin += 24 * 60; // เวลาออกข้ามเที่ยงคืน
 
   const lateMin = Math.max(0, inMin - shiftStart);
   const earlyMin = outMin !== null ? Math.max(0, shiftEnd - outMin) : 0;
