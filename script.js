@@ -34,10 +34,30 @@ function saveShifts(shifts) {
 function seedDefaultShiftsIfEmpty() {
   if (localStorage.getItem(SHIFTS_KEY)) return;
   saveShifts([
-    { code: 'T10', name: 'กะ 10:00-19:00', start: '10:00', end: '19:00', isOff: false },
-    { code: 'T13', name: 'กะ 13:00-22:00', start: '13:00', end: '22:00', isOff: false },
-    { code: 'OFF', name: 'วันหยุด', start: '', end: '', isOff: true }
+    { code: 'T10', name: 'กะ 10:00-19:00', start: '10:00', end: '19:00', isOff: false, otEligible: true, otEnd: '22:30' },
+    { code: 'T13', name: 'กะ 13:00-22:00', start: '13:00', end: '22:00', isOff: false, otEligible: false, otEnd: '' },
+    { code: 'OFF', name: 'วันหยุด', start: '', end: '', isOff: true, otEligible: false, otEnd: '' }
   ]);
+}
+
+// เติมค่า otEligible/otEnd ให้กะเก่าที่ยังไม่มีฟิลด์นี้ (ตั้งค่าเริ่มต้นตามกะที่ใช้จริง)
+function migrateShiftOtFields() {
+  const shifts = loadShifts();
+  const otDefaults = { T10: '22:30', T3: '10:00' };
+  let changed = false;
+  shifts.forEach(s => {
+    if (s.otEligible === undefined) {
+      if (otDefaults[s.code] && !s.isOff) {
+        s.otEligible = true;
+        s.otEnd = otDefaults[s.code];
+      } else {
+        s.otEligible = false;
+        s.otEnd = '';
+      }
+      changed = true;
+    }
+  });
+  if (changed) saveShifts(shifts);
 }
 
 function getShift(code) {
@@ -112,15 +132,28 @@ function calcStatus(shiftCode, clockIn, clockOut) {
 
   const lateMin = Math.max(0, inMin - shiftStart);
   const earlyMin = outMin !== null ? Math.max(0, shiftEnd - outMin) : 0;
-  const otMin = outMin !== null ? Math.max(0, outMin - shiftEnd) : 0;
+  let otMin = 0;
+  if (shift.otEligible && outMin !== null) {
+    const otStart = Math.max(inMin, shiftStart) + 9 * 60; // OT เริ่มนับหลังทำงานครบ 9 ชม. จากเวลาเข้า (ถ้าเข้าก่อนเวลากะ ให้นับจากเวลาเริ่มกะแทน)
+    let otCap = toMinutes(shift.otEnd || '22:30'); // เวลาสิ้นสุด OT ตายตัวต่อกะ ไม่นับเลยเวลานี้
+    if (otCap <= shiftStart) otCap += 24 * 60;
+    otMin = Math.max(0, Math.min(outMin, otCap) - otStart);
+  }
   const deficit = lateMin + earlyMin;
 
-  if (!clockOut) return { label: `🟡 สาย ${minutesToText(lateMin)} (ยังไม่ลงเวลาออก)`, cls: 'late', lateMin, earlyMin: 0, otMin: 0 };
+  const otSuffix = otMin > 0 ? ` (OT ${minutesToText(otMin)})` : '';
+  const isLateAbsent = lateMin > 30; // สาย > 30 นาที ให้นับเป็นขาดงาน
+
+  if (!clockOut) {
+    const label = isLateAbsent ? `🔴 ขาดงาน ${minutesToText(lateMin)} (ยังไม่ลงเวลาออก)` : `🟡 สาย ${minutesToText(lateMin)} (ยังไม่ลงเวลาออก)`;
+    return { label, cls: isLateAbsent ? 'absent' : 'late', lateMin, earlyMin: 0, otMin: 0 };
+  }
   if (deficit === 0 && otMin > 0) return { label: `🟢 ตรงเวลา (ทำงานเกิน ${minutesToText(otMin)})`, cls: 'ontime', lateMin, earlyMin, otMin };
   if (deficit === 0) return { label: '🟢 ตรงเวลา', cls: 'ontime', lateMin: 0, earlyMin: 0, otMin };
-  if (lateMin > 0 && earlyMin > 0) return { label: `🔴 ขาดงาน ${minutesToText(deficit)}`, cls: 'absent', lateMin, earlyMin, otMin };
-  if (lateMin > 0) return { label: `🟡 สาย ${minutesToText(lateMin)}`, cls: 'late', lateMin, earlyMin, otMin };
-  return { label: `🟠 ออกก่อนเวลา ${minutesToText(earlyMin)}`, cls: 'late', lateMin, earlyMin, otMin };
+  if (isLateAbsent) return { label: `🔴 ขาดงาน ${minutesToText(lateMin + earlyMin)}${otSuffix}`, cls: 'absent', lateMin, earlyMin, otMin };
+  if (lateMin > 0 && earlyMin > 0) return { label: `🔴 ขาดงาน ${minutesToText(deficit)}${otSuffix}`, cls: 'absent', lateMin, earlyMin, otMin };
+  if (lateMin > 0) return { label: `🟡 สาย ${minutesToText(lateMin)}${otSuffix}`, cls: 'late', lateMin, earlyMin, otMin };
+  return { label: `🟠 ออกก่อนเวลา ${minutesToText(earlyMin)}${otSuffix}`, cls: 'late', lateMin, earlyMin, otMin };
 }
 
 // ---- TABS ----
@@ -305,13 +338,64 @@ function monthlyBuckets() {
     if (!map[mk]) map[mk] = { lateMin: 0, present: 0, absent: 0 };
     map[mk].lateMin += status.lateMin + status.earlyMin;
     if (status.cls === 'off') { /* ไม่นับ */ }
-    else if (status.cls === 'absent' && !e.clockIn) map[mk].absent += 1;
+    else if (status.cls === 'absent') map[mk].absent += 1;
     else map[mk].present += 1;
   });
   return Object.keys(map).sort().map(mk => ({ month: mk, ...map[mk] }));
 }
 
+function computeAttendanceSummary() {
+  let ontimeDays = 0, lateDays = 0, absentDays = 0;
+  let totalLateMin = 0, totalAbsentMin = 0, totalOtMin = 0;
+  const items = [];
+  window.entries.forEach(e => {
+    const status = calcStatus(e.shiftCode, e.clockIn, e.clockOut);
+    if (status.cls === 'off') return;
+    totalOtMin += status.otMin || 0;
+    if (status.cls === 'ontime') ontimeDays++;
+    else if (status.cls === 'absent') {
+      absentDays++;
+      totalAbsentMin += status.lateMin + status.earlyMin;
+      items.push({ date: e.date, label: status.label });
+    } else if (status.cls === 'late' && status.lateMin > 0) {
+      lateDays++;
+      totalLateMin += status.lateMin;
+      items.push({ date: e.date, label: status.label });
+    }
+  });
+  items.sort((a, b) => b.date.localeCompare(a.date));
+  return { ontimeDays, lateDays, absentDays, totalLateMin, totalAbsentMin, totalOtMin, items };
+}
+
+function renderAttendanceSummary() {
+  const s = computeAttendanceSummary();
+  document.getElementById('ontimeDays').textContent = s.ontimeDays;
+  document.getElementById('lateDays').textContent = s.lateDays;
+  document.getElementById('absentDays').textContent = s.absentDays;
+  document.getElementById('totalLateMin').textContent = s.totalLateMin;
+  document.getElementById('totalAbsentMin').textContent = s.totalAbsentMin;
+  document.getElementById('totalOtHours').textContent = (s.totalOtMin / 60).toFixed(1);
+
+  const list = document.getElementById('lateAbsentList');
+  const empty = document.getElementById('lateAbsentEmpty');
+  if (!s.items.length) {
+    list.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+  list.innerHTML = s.items.slice(0, 20).map(it => `
+    <div class="cat-row">
+      <div>
+        <div class="cat-name">${escapeHtml(it.date)}</div>
+        <div class="cat-sub">${it.label}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
 function renderTrend() {
+  renderAttendanceSummary();
   const buckets = monthlyBuckets();
 
   if (buckets.length) {
@@ -422,13 +506,15 @@ function addShiftFromInput() {
   const start = document.getElementById('newShiftStart').value;
   const end = document.getElementById('newShiftEnd').value;
   const isOff = document.getElementById('newShiftIsOff').checked;
+  const otEligible = document.getElementById('newShiftOtEligible').checked;
+  const otEnd = document.getElementById('newShiftOtEnd').value || '22:30';
 
   if (!code) { showToast('⚠️ กรุณาระบุรหัสกะ'); return; }
   const shifts = loadShifts();
   if (shifts.some(s => s.code === code)) { showToast('⚠️ มีรหัสกะนี้อยู่แล้ว'); return; }
   if (!isOff && (!start || !end)) { showToast('⚠️ กรุณาระบุเวลาเริ่ม-เลิก'); return; }
 
-  shifts.push({ code, name: name || code, start: isOff ? '' : start, end: isOff ? '' : end, isOff });
+  shifts.push({ code, name: name || code, start: isOff ? '' : start, end: isOff ? '' : end, isOff, otEligible: isOff ? false : otEligible, otEnd: otEligible ? otEnd : '' });
   saveShifts(shifts);
 
   document.getElementById('newShiftCode').value = '';
@@ -436,6 +522,9 @@ function addShiftFromInput() {
   document.getElementById('newShiftStart').value = '';
   document.getElementById('newShiftEnd').value = '';
   document.getElementById('newShiftIsOff').checked = false;
+  document.getElementById('newShiftOtEligible').checked = false;
+  document.getElementById('newShiftOtEnd').value = '22:30';
+  document.getElementById('newShiftOtEndRow').style.display = 'none';
   renderShiftList();
   populateShiftSelect(document.getElementById('shiftSelect').value);
   showToast('✅ เพิ่มกะแล้ว');
@@ -452,7 +541,7 @@ function renderShiftList() {
     <div class="cat-row" data-code="${escapeHtml(s.code)}">
       <div>
         <div class="cat-name">${escapeHtml(s.code)} - ${escapeHtml(s.name)}</div>
-        <div class="cat-sub">${s.isOff ? 'วันหยุด' : escapeHtml(s.start) + ' - ' + escapeHtml(s.end)}</div>
+        <div class="cat-sub">${s.isOff ? 'วันหยุด' : escapeHtml(s.start) + ' - ' + escapeHtml(s.end)}${s.otEligible ? ` · OT ถึง ${escapeHtml(s.otEnd)}` : ' · ไม่นับ OT'}</div>
       </div>
       <div class="cat-actions">
         <button type="button" data-action="rename">✏️</button>
@@ -475,6 +564,10 @@ function startRenameShift(row) {
       </div>
       <div class="form-row">
         <input type="text" class="shift-edit-end" value="${escapeHtml(s.end)}" placeholder="เลิก HH:MM" ${s.isOff ? 'disabled' : ''}>
+      </div>
+      <label class="checkbox-row"><input type="checkbox" class="shift-edit-ot" ${s.otEligible ? 'checked' : ''} ${s.isOff ? 'disabled' : ''}> เป็นกะ OT</label>
+      <div class="form-row">
+        <input type="text" class="shift-edit-otend" value="${escapeHtml(s.otEnd || '22:30')}" placeholder="สิ้นสุด OT HH:MM" ${s.isOff ? 'disabled' : ''}>
         <div class="cat-actions">
           <button type="button" class="btn-cat-save" data-action="save-rename">✔️ บันทึก</button>
           <button type="button" class="btn-cat-cancel" data-action="cancel-rename">✕ ยกเลิก</button>
@@ -492,11 +585,15 @@ function saveRenameShift(row) {
   const name = row.querySelector('.shift-edit-name').value.trim();
   const start = row.querySelector('.shift-edit-start').value.trim();
   const end = row.querySelector('.shift-edit-end').value.trim();
+  const otEligible = row.querySelector('.shift-edit-ot').checked;
+  const otEnd = row.querySelector('.shift-edit-otend').value.trim() || '22:30';
   if (!name) { showToast('⚠️ กรุณาระบุชื่อกะ'); return; }
   shifts[idx].name = name;
   if (!shifts[idx].isOff) {
     shifts[idx].start = start;
     shifts[idx].end = end;
+    shifts[idx].otEligible = otEligible;
+    shifts[idx].otEnd = otEligible ? otEnd : '';
   }
   saveShifts(shifts);
   renderShiftList();
@@ -580,9 +677,114 @@ async function importBackup(event) {
   event.target.value = '';
 }
 
+// ---- EXCEL EXPORT / IMPORT ----
+function openExportModal() {
+  const dates = window.entries.map(e => e.date).sort();
+  document.getElementById('exportFromDate').value = dates[0] || '';
+  document.getElementById('exportToDate').value = dates[dates.length - 1] || '';
+  document.getElementById('exportModalBg').classList.add('active');
+}
+
+function closeExportModal() {
+  document.getElementById('exportModalBg').classList.remove('active');
+}
+
+function confirmExportXlsx() {
+  const from = document.getElementById('exportFromDate').value;
+  const to = document.getElementById('exportToDate').value;
+  if (from && to && from > to) { showToast('⚠️ ช่วงวันที่ไม่ถูกต้อง'); return; }
+  closeExportModal();
+  exportXlsx(from, to);
+}
+
+function exportXlsx(from, to) {
+  const filtered = window.entries.filter(e => {
+    if (from && e.date < from) return false;
+    if (to && e.date > to) return false;
+    return true;
+  }).sort((a, b) => a.date.localeCompare(b.date));
+
+  if (!filtered.length) { showToast('⚠️ ไม่มีข้อมูลในช่วงที่เลือก'); return; }
+
+  const rows = filtered.map(e => {
+    const shift = getShift(e.shiftCode);
+    const status = calcStatus(e.shiftCode, e.clockIn, e.clockOut);
+    return {
+      'วันที่': e.date,
+      'รหัสกะ': e.shiftCode,
+      'ชื่อกะ': shift ? shift.name : '',
+      'เวลาเข้า': e.clockIn || '',
+      'เวลาออก': e.clockOut || '',
+      'สถานะ': status.label.replace(/^\S+\s/, ''),
+      'หมายเหตุ': e.note || ''
+    };
+  });
+  const ws = XLSX.utils.json_to_sheet(rows);
+  ws['!cols'] = [{ wch: 12 }, { wch: 10 }, { wch: 18 }, { wch: 10 }, { wch: 10 }, { wch: 20 }, { wch: 24 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'ลงเวลา');
+  const stamp = (from || filtered[0].date).replace(/-/g, '') + '_' + (to || filtered[filtered.length - 1].date).replace(/-/g, '');
+  XLSX.writeFile(wb, `attendance-${stamp}.xlsx`);
+  showToast('📊 ส่งออก Excel แล้ว');
+}
+
+function excelDateToStr(val) {
+  if (val instanceof Date) {
+    return `${val.getFullYear()}-${String(val.getMonth() + 1).padStart(2, '0')}-${String(val.getDate()).padStart(2, '0')}`;
+  }
+  return String(val || '').trim();
+}
+
+function excelTimeToStr(val) {
+  if (val === undefined || val === null || val === '') return '';
+  if (val instanceof Date) {
+    return `${String(val.getHours()).padStart(2, '0')}:${String(val.getMinutes()).padStart(2, '0')}`;
+  }
+  if (typeof val === 'number') {
+    const totalMin = Math.round(val * 24 * 60);
+    return `${String(Math.floor(totalMin / 60) % 24).padStart(2, '0')}:${String(totalMin % 60).padStart(2, '0')}`;
+  }
+  return String(val).trim();
+}
+
+async function importXlsx(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  try {
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+    if (!rows.length) { showToast('⚠️ ไม่พบข้อมูลในไฟล์'); return; }
+
+    const incomingEntries = rows.map(r => ({
+      id: Date.now() + Math.floor(Math.random() * 100000),
+      date: excelDateToStr(r['วันที่'] ?? r['date'] ?? r['Date']),
+      shiftCode: String(r['รหัสกะ'] ?? r['shiftCode'] ?? r['Shift'] ?? '').trim(),
+      clockIn: excelTimeToStr(r['เวลาเข้า'] ?? r['clockIn']),
+      clockOut: excelTimeToStr(r['เวลาออก'] ?? r['clockOut']),
+      note: String(r['หมายเหตุ'] ?? r['note'] ?? '').trim()
+    })).filter(e => e.date && e.shiftCode);
+
+    if (!incomingEntries.length) { showToast('⚠️ ไฟล์ไม่ถูกต้อง'); return; }
+
+    const ok = await showConfirmModal(`นำเข้า ${incomingEntries.length} รายการ จะรวมกับข้อมูลเดิม ยืนยันหรือไม่?`);
+    if (!ok) return;
+
+    incomingEntries.forEach(e => window.entries.push(e));
+    saveData();
+    renderHistory();
+    showToast('✅ นำเข้า Excel สำเร็จ');
+  } catch (e) {
+    showToast('⚠️ อ่านไฟล์ Excel ไม่สำเร็จ');
+  }
+  event.target.value = '';
+}
+
 // ---- INIT ----
 function initApp() {
   seedDefaultShiftsIfEmpty();
+  migrateShiftOtFields();
   loadData();
   clearForm();
   renderHistory();

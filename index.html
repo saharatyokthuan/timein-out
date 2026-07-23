@@ -17,6 +17,9 @@
     <button class="btn-chip" onclick="exportBackup()">Backup</button>
     <button class="btn-chip" onclick="document.getElementById('restoreInput').click()">Restore</button>
     <input type="file" id="restoreInput" accept=".json" style="display:none" onchange="importBackup(event)">
+    <button class="btn-chip" onclick="openExportModal()">Excel</button>
+    <button class="btn-chip" onclick="document.getElementById('importXlsxInput').click()">นำเข้า Excel</button>
+    <input type="file" id="importXlsxInput" accept=".xlsx,.xls" style="display:none" onchange="importXlsx(event)">
   </div>
 </div>
 
@@ -66,6 +69,24 @@
 <!-- ===== TREND TAB ===== -->
 <div class="tab-page" id="tab-trend">
   <div class="card">
+    <div class="card-title">สรุปขาดงาน / มาสาย (สะสมทั้งหมด)</div>
+    <div class="grid-3">
+      <div class="stat-box"><div class="stat-label">ตรงเวลา (วัน)</div><div class="stat-val good" id="ontimeDays">0</div></div>
+      <div class="stat-box"><div class="stat-label">มาสาย (วัน)</div><div class="stat-val" id="lateDays">0</div></div>
+      <div class="stat-box"><div class="stat-label">ขาดงาน (วัน)</div><div class="stat-val bad" id="absentDays">0</div></div>
+    </div>
+    <div class="grid-3" style="margin-top:0.6rem;">
+      <div class="stat-box"><div class="stat-label">รวมนาทีสายสะสม</div><div class="stat-val" id="totalLateMin">0</div></div>
+      <div class="stat-box"><div class="stat-label">รวมนาทีขาดงานสะสม</div><div class="stat-val bad" id="totalAbsentMin">0</div></div>
+      <div class="stat-box"><div class="stat-label">รวม OT สะสม (ชม.)</div><div class="stat-val good" id="totalOtHours">0</div></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">สายเรียงล่าสุด / ขาดงานเรียงล่าสุด</div>
+    <div id="lateAbsentList" class="category-list"></div>
+    <div id="lateAbsentEmpty" class="empty-hint" style="display:none;">ไม่มีรายการสาย/ขาดงาน</div>
+  </div>
+  <div class="card">
     <div class="card-title">สรุปภาพรวม</div>
     <div class="grid-3">
       <div class="stat-box"><div class="stat-label">สายเฉลี่ย/เดือน (นาที)</div><div class="stat-val" id="avgLate">0</div></div>
@@ -98,6 +119,10 @@
       <div class="form-group"><label for="newShiftEnd">เวลาเลิก</label><input type="time" id="newShiftEnd"></div>
     </div>
     <label class="checkbox-row"><input type="checkbox" id="newShiftIsOff"> เป็นวันหยุด (ไม่มีเวลาเข้า-ออก)</label>
+    <label class="checkbox-row"><input type="checkbox" id="newShiftOtEligible" onchange="document.getElementById('newShiftOtEndRow').style.display=this.checked?'':'none'"> เป็นกะ OT (นับ OT อัตโนมัติ)</label>
+    <div class="form-row" id="newShiftOtEndRow" style="display:none;">
+      <div class="form-group"><label for="newShiftOtEnd">เวลาสิ้นสุด OT</label><input type="time" id="newShiftOtEnd" value="22:30"></div>
+    </div>
     <button type="button" class="btn-add" style="margin-top:0.6rem;" onclick="addShiftFromInput()">＋ เพิ่มกะ</button>
   </div>
   <div id="shiftList" class="category-list"></div>
@@ -128,7 +153,29 @@
   </div>
 </div>
 
+<!-- ===== EXPORT RANGE MODAL ===== -->
+<div class="modal-bg" id="exportModalBg">
+  <div class="modal" style="max-width:340px;">
+    <h2>ส่งออก Excel</h2>
+    <div class="form-row">
+      <div class="form-field">
+        <label>จากวันที่</label>
+        <input type="date" id="exportFromDate">
+      </div>
+      <div class="form-field">
+        <label>ถึงวันที่</label>
+        <input type="date" id="exportToDate">
+      </div>
+    </div>
+    <div class="modal-btns">
+      <button type="button" class="btn-cancel" onclick="closeExportModal()">ยกเลิก</button>
+      <button type="button" class="btn-save" onclick="confirmExportXlsx()">ส่งออก</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="script.js" defer></script>
 </body>
 </html>
